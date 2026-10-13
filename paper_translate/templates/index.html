@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>論文翻譯</title>
+<style>
+  :root { --bg: #f6f7f9; --card: #fff; --text: #1d2330; --muted: #677085; --accent: #2f6fde; --border: #dde1e8; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14171c; --card: #1d2128; --text: #e6e9ef; --muted: #98a1b3; --accent: #6b9cff; --border: #313743; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font-family: system-ui, "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", sans-serif; }
+  main { max-width: 560px; margin: 48px auto; padding: 0 16px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  p.sub { color: var(--muted); margin: 0 0 24px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 24px; }
+  #drop { border: 2px dashed var(--border); border-radius: 10px; padding: 36px 16px; text-align: center;
+          cursor: pointer; color: var(--muted); transition: border-color .15s; }
+  #drop.over, #drop:hover { border-color: var(--accent); color: var(--text); }
+  #drop strong { color: var(--text); }
+  .opts { margin: 20px 0; display: grid; gap: 10px; font-size: .95rem; }
+  select { padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--card); color: var(--text); }
+  button, a.btn { display: inline-block; width: 100%; padding: 12px; border: 0; border-radius: 8px; font-size: 1rem;
+           background: var(--accent); color: #fff; cursor: pointer; text-align: center; text-decoration: none; }
+  button:disabled { opacity: .5; cursor: default; }
+  .bar { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; margin: 16px 0 8px; }
+  .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+  #msg { color: var(--muted); font-size: .9rem; min-height: 1.2em; }
+  #msg.err { color: #d64545; }
+  #result { margin-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>論文翻譯</h1>
+  <p class="sub">上傳英文論文 PDF，下載版面相同的繁體中文版本。圖片和表格都留在原位。</p>
+  <div class="card">
+    <form id="form">
+      <label id="drop">
+        <input type="file" id="file" name="file" accept="application/pdf" hidden>
+        <div id="dropText"><strong>點這裡選擇 PDF</strong><br>或把檔案拖進來</div>
+      </label>
+      <div class="opts">
+        <label>翻譯引擎：
+          <select name="backend">
+            <option value="claude" {% if default_backend == 'claude' %}selected{% endif %}>Claude（品質最好，需要 API key）</option>
+            <option value="google" {% if default_backend == 'google' %}selected{% endif %}>Google 翻譯（免費）</option>
+          </select>
+        </label>
+        <label><input type="checkbox" name="references"> 連參考文獻也翻譯</label>
+        <label><input type="checkbox" name="figure_text"> 翻譯圖表內的短標籤</label>
+      </div>
+      <button id="go" disabled>開始翻譯</button>
+    </form>
+    <div class="bar"><div id="bar"></div></div>
+    <div id="msg"></div>
+    <div id="result"></div>
+  </div>
+</main>
+<script>
+const fileInput = document.getElementById('file'), drop = document.getElementById('drop');
+const go = document.getElementById('go'), bar = document.getElementById('bar');
+const msg = document.getElementById('msg'), result = document.getElementById('result');
+
+function pick(f) {
+  if (!f) return;
+  const dt = new DataTransfer(); dt.items.add(f); fileInput.files = dt.files;
+  document.getElementById('dropText').innerHTML = '<strong></strong>';
+  document.querySelector('#dropText strong').textContent = f.name;
+  go.disabled = false;
+}
+fileInput.addEventListener('change', () => pick(fileInput.files[0]));
+['dragover', 'dragenter'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach(e => drop.addEventListener(e, () => drop.classList.remove('over')));
+drop.addEventListener('drop', ev => { ev.preventDefault(); pick(ev.dataTransfer.files[0]); });
+
+function setMsg(text, err) { msg.textContent = text; msg.className = err ? 'err' : ''; }
+
+document.getElementById('form').addEventListener('submit', async ev => {
+  ev.preventDefault();
+  go.disabled = true; result.innerHTML = ''; bar.style.width = '0'; setMsg('上傳中…');
+  try {
+    const res = await fetch('/api/translate', { method: 'POST', body: new FormData(ev.target) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '上傳失敗');
+    poll(data.job_id);
+  } catch (e) { setMsg(e.message, true); go.disabled = false; }
+});
+
+async function poll(id) {
+  const s = await (await fetch('/api/status/' + id)).json();
+  bar.style.width = (s.progress * 100) + '%';
+  if (s.status === 'running') { setMsg(s.message); setTimeout(() => poll(id), 1000); return; }
+  go.disabled = false;
+  if (s.status === 'error') { setMsg('翻譯失敗：' + s.message, true); return; }
+  setMsg('翻譯完成！');
+  result.innerHTML = `<a class="btn" href="/api/download/${id}">下載中文版 PDF</a>`;
+}
+</script>
+</body>
+</html>
