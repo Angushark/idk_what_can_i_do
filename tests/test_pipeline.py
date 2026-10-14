@@ -71,6 +71,30 @@ def test_web_flow():
     assert "paper_zh.pdf" in r.headers["Content-Disposition"]
 
 
+def test_google_waits_out_rate_limit():
+    from concurrent.futures import ThreadPoolExecutor
+
+    from deep_translator.exceptions import TooManyRequests
+
+    from paper_translate.translators import GoogleTranslator
+
+    start, calls = time.monotonic(), []
+
+    class Blocked:  # refuses everything for the first 0.5 s, like Google after too many requests
+        def translate(self, text):
+            calls.append(text)
+            if time.monotonic() - start < 0.5:
+                raise TooManyRequests()
+            return "譯文"
+
+    g = GoogleTranslator()
+    g._t, g.MIN_INTERVAL, g.BACKOFF = Blocked(), 0, (0.2, 0.2, 0.2, 0.2)
+    with ThreadPoolExecutor(4) as pool:
+        results = list(pool.map(lambda t: g.translate_batch([t]), ["a", "b", "c", "d"]))
+    assert results == [["譯文"]] * 4
+    assert len(calls) <= 4 + 3  # threads paused together instead of each hammering Google
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

@@ -92,14 +92,15 @@ class GoogleTranslator:
     """Free Google Translate via deep-translator. No API key, lower quality.
 
     Google allows about 5 requests per second, so paragraphs are packed into
-    few large requests, all threads share one rate limit, and rate-limit
-    errors are retried with backoff.
+    few large requests and only one request is in flight at a time. Once Google
+    starts refusing, it keeps refusing for a minute or more, so every thread
+    pauses together and retries for about four minutes before giving up.
     """
 
     name = "google"
     MAX_CHARS = 4500          # Google's limit is 5000 characters per request
     MIN_INTERVAL = 0.35       # seconds between requests, across all threads (< 3 req/s)
-    RETRIES = 5
+    BACKOFF = (5, 10, 20, 40, 60, 60, 60)  # seconds to wait after each refused request
 
     def __init__(self):
         from deep_translator import GoogleTranslator as _G
@@ -111,18 +112,20 @@ class GoogleTranslator:
     def _request(self, text: str) -> str:
         from deep_translator.exceptions import RequestError, TooManyRequests
 
-        for attempt in range(self.RETRIES):
-            with self._lock:
+        # Holding the lock through the request and the backoff makes a rate-limit pause apply to every thread.
+        with self._lock:
+            for wait_after in (*self.BACKOFF, None):
                 wait = self._last + self.MIN_INTERVAL - time.monotonic()
                 if wait > 0:
                     time.sleep(wait)
-                self._last = time.monotonic()
-            try:
-                return self._t.translate(text) or text
-            except (TooManyRequests, RequestError):
-                if attempt == self.RETRIES - 1:
-                    raise
-                time.sleep(2 ** attempt * 2)  # 2, 4, 8, 16 s
+                try:
+                    return self._t.translate(text) or text
+                except (TooManyRequests, RequestError):
+                    if wait_after is None:
+                        raise
+                    time.sleep(wait_after)
+                finally:
+                    self._last = time.monotonic()
         return text
 
     def translate_batch(self, texts: list[str], context: str = "") -> list[str]:
