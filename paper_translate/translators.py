@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from typing import Protocol
 
 SYSTEM_PROMPT = """你是專業的學術論文翻譯者，負責把英文論文翻譯成台灣慣用的繁體中文。
@@ -87,17 +89,57 @@ class ClaudeTranslator:
 
 
 class GoogleTranslator:
-    """Free Google Translate via deep-translator. No API key, lower quality."""
+    """Free Google Translate via deep-translator. No API key, lower quality.
+
+    Google allows about 5 requests per second, so paragraphs are packed into
+    few large requests, all threads share one rate limit, and rate-limit
+    errors are retried with backoff.
+    """
 
     name = "google"
+    MAX_CHARS = 4500          # Google's limit is 5000 characters per request
+    MIN_INTERVAL = 0.35       # seconds between requests, across all threads (< 3 req/s)
+    RETRIES = 5
 
     def __init__(self):
         from deep_translator import GoogleTranslator as _G
 
         self._t = _G(source="en", target="zh-TW")
+        self._lock = threading.Lock()
+        self._last = 0.0
+
+    def _request(self, text: str) -> str:
+        from deep_translator.exceptions import RequestError, TooManyRequests
+
+        for attempt in range(self.RETRIES):
+            with self._lock:
+                wait = self._last + self.MIN_INTERVAL - time.monotonic()
+                if wait > 0:
+                    time.sleep(wait)
+                self._last = time.monotonic()
+            try:
+                return self._t.translate(text) or text
+            except (TooManyRequests, RequestError):
+                if attempt == self.RETRIES - 1:
+                    raise
+                time.sleep(2 ** attempt * 2)  # 2, 4, 8, 16 s
+        return text
 
     def translate_batch(self, texts: list[str], context: str = "") -> list[str]:
-        return [self._t.translate(t[:4900]) or t for t in texts]
+        # Paragraphs contain no newlines, so a newline separates them within one request.
+        out: list[str] = []
+        chunk: list[str] = []
+        for t in texts + [None]:
+            if t is not None and (not chunk or sum(len(c) + 1 for c in chunk) + len(t) <= self.MAX_CHARS):
+                chunk.append(t[: self.MAX_CHARS])
+                continue
+            if chunk:
+                parts = self._request("\n".join(chunk)).split("\n")
+                if len(parts) != len(chunk):  # Google merged or split lines: one request per paragraph
+                    parts = [self._request(c) for c in chunk]
+                out.extend(parts)
+            chunk = [t[: self.MAX_CHARS]] if t is not None else []
+        return out
 
 
 class FakeTranslator:
